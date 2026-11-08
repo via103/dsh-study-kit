@@ -1,0 +1,36 @@
+{
+  "name": "@local/dsh-study",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "学习插件体系：四个协议文件 + 复习提纲 + 判题/编译/靶场工具 + 分层体检",
+  "engines": {
+    "dsh": ">=0.2.2-rc.1"
+  },
+  "exports": {
+    ".": "./study-suite.js",
+    "./study-suite.js": "./study-suite.js",
+    "./file-guard.js": "./file-guard.js",
+    "./*": "./*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node run-all.mjs",
+    "test:fast": "node run-all.mjs --fast",
+    "doctor": "node study-doctor.mjs",
+    "falsify": "node test/falsify-contract.mjs",
+    "probe": "node test/probe-code-run.mjs",
+    "presets": "node tools/presets.mjs",
+    "installs": "node tools/dsh-install.mjs",
+    "timeline": "node tools/tool-timeline.mjs",
+    "replay": "node tools/replay-file-edits.mjs",
+    "fm": "node tools/fm.mjs",
+    "snapshot": "node tools/snapshot.mjs",
+    "selfcheck": "node tools/selfcheck.mjs",
+    "decode": "node tools/decode-session.mjs"
+  }
+}

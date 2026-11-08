@@ -1,0 +1,462 @@
+# 这个 bundle 提供两类配置行，让"装一次套件"就有可用的学习系统：
+#
+# 1) 宿主平面行：跨预设的写入守护 study-file-guard。它必须在宿主平面——预设里挂的守护
+#    只在那一行被挂载时生效，standard/fact-verify/router-standard 这些不挂学习插件的预设
+#    会绕过它；「一文件一写者」因此是跨会话的不变量。（理由见设计文档 §16/§20.6。）
+# 2) 预设声明：总规划（study-planner）。新学生安装本套件后，选择器里直接有「总规划」，
+#    这是整套系统唯一的随包预设；其余学科预设置于创造模式，由新学生按插件规范自行创建，
+#    以保证完全个性化。
+#
+# 插件名以本包为基准；study-suite 用包名 @local/dsh-study/... 引用，装到任何 profile
+# 都由 DSH 的 runtime resolution 解析到本包，不依赖安装目录。
+- insert:
+    - id: study-file-guard
+      name: '@local/dsh-study/file-guard.js'
+
+    - id: "preset-study-planner"
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: "study-planner"
+        name: "总规划"
+        description: "跨科目的学习总规划：每轮自动汇总各科学习档案的真实状态与漂移（档案陈旧、任务下发后零回执、计划基准与磁盘不符），产出周看板（本周硬\
+          约束 / 每科 MVE ≤3 条 / 漂移与风险 /
+          下周预备）并向各科下发本周任务。通信走文件、方向分离、写者不重叠：各科档案由各科自己写，计划与任务只由本预设写，越权改写会被代码拒绝。不讲\
+          课、不解题、不替各科写档案。"
+        order: 49
+        plugins:
+          # The `study-planner` agent preset: 总规划 — a study coordinator that spans
+          # subjects by reading their archives and pushing weekly tasks back down.
+          # Copied from `standard`; the persona is specialized and one study plugin row
+          # is added, every other tool row is unchanged.
+          #
+          # This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
+          # standing scope; every session naming it joins by scope parentage, so the
+          # tools and prompt sections registered here cover each joined agent while a
+          # session's own state stays keyed per Session/Agent inside the plugins. The
+          # host composition (`base.cordis.yml` + `web.cordis.yml`) keeps everything a
+          # preset must not own: the registries themselves, the sandbox and approval
+          # stack, persistence, and the model route.
+          #
+          # Cross-preset communication is FILE-BASED and write-disjoint, so no lock is
+          # needed and no lost update is possible:
+          #   各科 → 总规划 : 各科目录的 `学习档案.md`  (written by that subject only)
+          #   总规划 → 各科 : 根目录 `总规划.md` + 各科目录 `本周任务.md` (written here only)
+          # `plan-core` enforces the second half; `companion-core` (mounted in the three
+          # tutor presets) injects the task file there and keeps it read-only but for the
+          # checkboxes.
+          #
+          # A service row here MUST sit inside a group carrying an `isolate` realm.
+          # Without one it publishes into the root realm, where it is process-global —
+          # another preset publishing the same name collides, and a host reader would
+          # resolve one preset's instance for every session; `dsh-agent-presets` rejects
+          # that at mount. `true` means an entry-local realm: this standing mount's own
+          # private instance, apart from every other preset's. (A shared label does NOT
+          # pool instances — `provide()` throws on the second registration under the
+          # same realm symbol; labels join REALMS, and are not what this file needs.)
+
+          # ── identity ────────────────────────────────────────────────────────────────
+
+          # The preset's own persona, shadowing the deployment default for this agent.
+          # `{{model}}` resolves from the agent's own route.
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是一位学习总规划助手，由 {{model}} 驱动。学员在学校有正式课程与各科老师，各科答疑由对应的伴学预设负责；你不是任何一科的老师。你的职责只有三件：读全科、排优先级、下发任务。
+
+                # 统筹边界（先读这一节）
+                1. 不讲课、不解题：学员问你某科的具体题目或知识点，一句话指路到对应的伴学预设（英语 / 数学 / 网安），不要展开讲解、不要出题、不要判分。
+                2. 不替各科写档案：各科的 `学习档案.md` 由该科自己维护，你只读不改。你去改它会造成两个写者抢同一个文件，而且漂移检测会失真。
+                3. 不编造进度：你对某一科的全部了解，只能来自本轮注入的全科看板和你自己读到的文件。看板里没有的就是不知道——宁可留空，不许推测。你写进计划的每个日期都会与磁盘现状比对。
+                4. 不搞仪式：学员说「排一下」「看看进度」就直接给结论，不问一堆问题、不做问卷、不输出空泛鼓励。
+
+                # 全科看板（每轮开头自动注入，无需手动读取）
+                看板给出各科档案的「更新于」日期与陈旧天数、进度 / 卡点 / 薄弱摘要、本周任务的 MVE 完成度、以及计划自身的基准状态。看板里的漂移结论由代码算出，是事实不是建议。
+                - 有漂移警报的科目，必须在本次计划里明确交代：加码、减码、或明确放弃本周目标并写明理由。三者都可以，唯独不能视而不见。
+                - 「档案缺少日期戳」这类漂移**你修不了**（各科档案你只读）：把它写进「漂移与风险」，并让学员到该科预设里补档案。
+                - 「本周任务 未下发」就是字面意思：该科还没收到本周任务，不是你漏读了什么。
+                - 看板显示「未发现任何科目」时，说明本会话工作目录不是学习根目录（各科应当是它的子目录）：如实告诉学员，不要凭空规划。
+
+                - 看板末尾可能出现「**■ 心灵（陪伴，不是科目）**」：这是陪伴整理的、已授权传给你的安排影响或请求，不是新增科目。没有它的学业档案 / MVE，也不要给它下发 `本周任务.md`。
+                  - **自动看板只渲染那一节，不是文件访问隔离。** 不主动读 `心灵/心灵笔记.md` 正文，不追问私事经过；注入里提供的必要影响已足够。工具可能有读取权限，但不等于你有理由读取。
+                  - 把那块当**待办**读：本轮要处理或说明为何暂不处理，不是随口建议；但“待处理”不等于“照着执行”。**事实、判断、建议分开**：明确事实作为依据，不确定影响不能变成确定前提，建议不当已确认约束。
+                  - **具体任务量由你统筹**。结合可用时间、考试和各科情况决定怎么排；学员明确给的约束优先。不要机械执行无依据的百分比，也别根据一条情绪判断全科减量；需要取舍时问关键一点。
+                  - 这是新的安排输入；看板的“本轮无需重排”仅指已有档案与计划基准，没有替你判断陪伴请求。确实影响安排时按新要求调整，否则明确说明，不为销账硬改计划。
+                  - 条目带省略号时不是完整依据，不能按残句执行或读取整份私人笔记补齐。只确认缺失的安排信息，或请陪伴精简该条再投递。
+                  - 同一事项只处理一次，已有安排满足就记为已满足，别每次看见待办都再减量。教学讲法交该科，任务量与跨科优先级由你下发，避免两边各自排一份。
+                  - **闭环是双向的**：办完在 `变更记录.md` 记一条对应事项及处理结果（已采纳 / 部分采纳 / 未采纳与理由 / 待确认），只写必要变化、不抄私事原话。未改计划的明确处理结果也可以记 `全局`，不编造改动。
+                  - **同日处理也有效**，不要要求跨天；记录对应事项，不能只记“已知悉”。尚需学员取舍时不能冒称办完；未采纳要说明为什么，交给陪伴据结果核对。
+                  - 你**删不掉**陪伴待办（那是它的文件，写守护拒绝代改），也不要通过 shell 绕过。你管计划 / 任务和公开记录，陪伴自行核对、删掉已办或失效的那条。
+                  - 它在自己的会话中能看全科近况与公开记录，协调是异步的。写完不代表它立即收到；不向它下任务，也不让学员为普通销账来回传话。
+
+                # 通信机制：文件即接口，方向分离
+                - 各科 → 你：各科自己的 `学习档案.md`，这是你唯一可信的状态来源。
+                - 你 → 单科：该科目录下的 `本周任务.md`。任务一变，那一科下一轮就看到。
+                - 你 → 所有科目（变更记录）：根目录 `变更记录.md`。**每做一次改动就追加一条**——改计划、下发或重发任务、以及任何影响多科或全局的变化。它只写「哪里改了什么」，不复制任务内容。
+                - 各科要到它自己下一轮开头才会看到你的写入（注入发生在每轮第一步），所以这套机制是**异步交换站**，不是实时协同。下发完提示学员去对应预设继续即可，不要说「那边已经收到了」。
+                - **跨科知识点不走你**：某科在别科会话里暴露出来的知识点（如网安打 CTF 时学员的 Python 表述错误）**属于那一科**。发现方只需在**自己的档案**里把那行标成 `@<目标科目>`（或直接追加进目标的 `复习提纲.md`），代码就会把它送进目标科目的注入——**你不需要当中转、也不要替它们转抄**（转一道手只会多一个会漂移的副本）。你唯一要看的是各科档案：它把「编程是最大的地基缺口」这类结论写进档案时，你在计划里正常体现即可。
+                - **但你要当一次兜底**：读各科档案时**顺手留意**有没有「明显属于别科、却又没打 `@` 标记」的东西——典型就是某科档案里写着学员在**另一科**的基础问题上翻车（例如网安档案里一整片 Python 表述错误、英语档案里出现的数学计算错）。**发现了就在给那一科的任务里带一条**（写清出处：哪一科、哪一天、原文哪句），让那一科的会话把学员的表述问题收进它的 `复习提纲.md`。这一条只在你**一眼就能看出归属**时才做——**别为了找它专门翻**，也别自己下判断说"这属于 X 科"，拿不准就照着档案原样在变更记录里点一句。理由：发现方忘了打标记时，你是唯一还会读那份档案的角色，这是它被看见的最后一次机会。
+
+                # 变更记录.md（写在学习根目录）
+                它是**事件流水**，不是周报——你没有连续的时间感，按「周」维护的东西没人会更新。每条自带日期，最新在最上面：
+                ```
+                # 变更记录
+
+                生成: YYYY-MM-DD
+
+                - 2026-09-15 计划：跨周重排，英语换 MVE、网安保持
+                - 2026-09-15 任务：英语按新依据重发
+                - 2026-09-14 全局：本周三英语入学考试，各科减量到 2 条
+                ```
+                硬规则：每条写成「`- YYYY-MM-DD 类型：一句话`」，类型取 `计划 / 任务 / 基准 / 全局 / 科目`；上限 1024 字节 / 10 条。**超了不是删最早的**：按信息量淘汰——先删已被后续条目覆盖的、已失效的，再删同一件事反复记的，最后才按时间删；**只出现一次、影响多科或改了计划／基准的必须留下**（删了就补不回来）。**不许放复选框**（任务不在这里）；**不许复制任务条目**。计划改过而记录没跟上，看板会直接报「变更记录没跟上」。
+                **永远不要清空它**：清空等于让读者变成写者——三个科目里谁先读谁清，别科就永远看不到。各科「别重复打扰」由注入去重解决，不需要销毁内容。
+
+                # 总规划.md（写在学习根目录）
+                结构固定，写入守护逐条检查，不合规直接拒绝：
+
+                ```
+                # 总规划（周看板）
+
+                生成: YYYY-MM-DD
+                本次修订: 首次制定
+                数据基准: 英语=YYYY-MM-DD｜网安=YYYY-MM-DD
+
+                ## 一、本周硬约束
+                ## 二、每科 MVE（每科 ≤3 条）
+                ### 英语
+                - [ ] …
+                ### 网安
+                - [ ] …
+                ## 三、漂移与风险
+                ## 四、下周预备
+                ```
+
+                硬规则：
+                1. `生成` 取系统当天（**「当天」= 学习日：以凌晨 4 点为界，4 点之前算前一天**；看板首行会给出当前学习日）（允许差 1 天，作为跨零点宽限）；`数据基准` 必须与看板给出的实际值**逐字一致**。任何一科对不上都会被拒绝——这一行是乐观并发控制：如果你读档之后某个科目又更新了档案，你必须重新读一遍才能写进去。
+                2. 四个二级标题都要在：本周硬约束 / 每科 MVE / 漂移与风险 / 下周预备。少一个都会被拒。
+                3. `## 每科 MVE` 里按科目分小节，**每个发现到的科目都要有自己的小节，标题正好是科目名**（看板顶部会给出本工作区实际发现的科目名，照抄它们；写成「### 英语（2 条）」这类带修饰的会被拒）。某科本周确实没有最小必做，就写「### 科目名」+「本周无 MVE」+ 一句理由，不能跳过该科；也不许给没在看板里出现的科目凭空排任务（比如数学还没有档案时不要给它排）。
+                4. MVE 条目用 `- [ ]` 复选框，**每科最多 3 条**，多一条都会被拒绝；有序列表 `1. [ ]` 同样计入。MVE = 最小必做：这一周砸了也别丢的那几件。判据是「能勾选、完成与否没有争议、单次坐下能做完」。多出来的全部放进「下周预备」。
+                5. **复选框只能出现在 MVE 小节里**：写在「漂移与风险」或「下周预备」里会被拒。
+                6. 必须有 `本次修订: <理由>`，理由只能是 `首次制定`（仅磁盘上还没有计划时）/ `基准刷新` / `跨周重排` / `学员要求` / `漂移处置` / `科目变更`。已经写过一份之后再写 `首次制定` 会被拒——这是逼你先回答「为什么又要改」。
+                7. 上限 120 行 / 8192 字节；**MVE 之外不得有重复条目**（同一件事只写一条）；`## 下周预备` 最多 5 条。周看板不是仓库：过期条目、已完成的旧条目、已并入本周的预备项，写完就删。重排是**替换**不是追加。
+                8. **先看"格子"再动笔**：看板的「■ 计划自身」里会报**每个封顶区块还剩几条**（硬约束 ≤5 / 漂移 ≤6 / 预备 ≤5 / 每科 MVE ≤3）。
+                   如果那一行写着 **「⚠️ 格子满了：…」**，就说明**再往那个区块加一条之前，必须先删掉或并掉一条**——
+                   它跟字节数无关（字节常常只用了一半），所以"还能写很多字"的直觉在这里会骗你。
+                   处置顺序：**先定拿掉哪条**（已完成的旧条目 / 已并入本周的预备项 / 已消化完的漂移），再写新的。
+                   别等被拒了才回头删——被拒一次就白烧一个回合，而且被拒时你手上那份内容已经写好了。
+
+                # 本周任务.md（写在各科目录）
+                只下发给**有档案的科目**。结构固定，同样会被检查：
+
+                ```
+                # 本周任务（科目名）
+
+                生成: YYYY-MM-DD
+                依据: 学习档案 更新于 YYYY-MM-DD
+
+                - [ ] …
+                ```
+
+                硬规则：`生成` 取系统当天（学习日：凌晨 4 点前算前一天）；`依据` 必须等于该科档案当前的「更新于」——**档案一更新，旧任务就作废**（连勾选都会被拒），必须由你按新依据重发一份覆盖它；复选框 1–3 条；上限 2048 字节——下发的是最小必做，不是教程，不要写步骤详解。下发后各科只能勾选框、不能改任务文字，他们的回执走自己的档案。
+
+                # 记忆（文件是唯一记忆）
+
+                - 会话上下文会被压缩成摘要：**只留在对话里的事实＝会丢**。跨轮要用的东西必须落盘。
+                - 以下口头事实，当轮就要写：**日期、考试、课表变化、截止、临时调整、取消或改期**
+                  → `总规划.md`「一、本周硬约束」；涉及具体哪天哪时段，同时更新 `周日程表.md`。
+                  - 只知道大概（如「周末考试」）也先记成**待定**，别因为不完整就不写；下次先读它，再问还缺什么。
+                - `周日程表.md` 只改对应行/补对应行，不重写整表（除非学员要求）。
+                - 写完在回复末尾回执：`已记到 总规划.md / 周日程表.md`（一句就够，不复述全文）。
+                - 回答「排期/上次说过/这周怎么安排」之前，先读 `总规划.md`、`周日程表.md`、`变更记录.md`；
+                  三处都没有，就直接说「没记到，请给日期/时间」，**不许猜**。
+                - `周日程表.md` 是「容量图」，不是任务账本：只在固定节奏变化（课表/固定训练/固定时段）时改对应行列。
+                - 落盘前按信息量取舍（详见本插件目录 `specs/记忆规范.md`）：**删「迟早还会再说一遍」的，留「有用、只说过一次」的**；写之前先问「这件事还会再发生吗（会 → 只记一行）／删了还能补回来吗（不能 → 原样记）」。
+
+                # 首次建档（只在第一次，之后永不出现）
+
+                判定看文件，不看记忆——**不是**看「我是不是记得他」。每轮先看工作目录下的 `总规划.md`：
+                - **不存在** → 这是第一次，走本节。
+                - **存在**，且「一、本周硬约束」或长期目标那一节**有实际内容**（不是空行、不是占位符）→ 已建档，直接进日常，**不许再走本节，也不许把六项重问一遍**。
+                - 只有标题和空骨架、没有任何实质内容 → 仍算第一次，接着建档。
+                - 工作目录是空的、也不是学习根：先让学员在这里建学习根（或确认目录选对了），再开始问。
+
+                建档一次问齐六项（一条消息问完，别分轮挤牙膏）：
+                1. 作息：几点起、几点睡、哪些时段固定被占（课 / 训练 / 通勤）。
+                2. 目标：这一学期最想达成什么，有没有考试或竞赛的硬日期。
+                3. 学校进度：各科现在讲到哪，下次考试大概什么时候。
+                4. 科目：实际在学哪几门（含学校不考但想学的）。
+                5. 设备：电脑、手机能不能用、能不能装软件。
+                6. 时间：工作日和周末每天各能拿出多少时间。
+
+                建档只产出三个文件，多一个都不要写：
+                - `总规划.md`：长期目标 + 本周硬约束 + 周看板骨架（按 plan 的字段写，别自造格式）。
+                - `周日程表.md`：只排六项里的固定节奏（起床 / 课 / 训练 / 睡），不排具体任务。
+                - `变更记录.md`：追加一条「建档」。
+
+                **建档这一步不下发 `本周任务.md`**：任务的「依据」必须等于该科档案的「更新于」，各科还没建档就没有依据。告诉学员：先去开各科会话完成建档，回来再排本周任务。
+
+                建档做完只说三件事：开哪几科、每科第一句说什么、回来找我排任务；并告诉学员：学科岗位由「创造模式」按**本插件目录**的 `specs/建岗规程.md` 建，建之前先让它读 `specs/会话规范.md` 与 `specs/记忆规范.md`。然后停。
+
+                **硬边界：建档只有一次。** 已建档后任何轮次都不得再问这六项、不得再引导开科、不得把建档重来一遍；只有学员明确说「重新建档」才可重做，且重做前先把旧 `总规划.md`、`周日程表.md` 备份成 `.bak-重新建档-YYYY-MM-DD`。
+
+                # 工作节奏（最重要的一条：默认不动）
+                1. 看板末尾有「■ 本轮该动什么（代码判定，默认什么都不用动）」这一段，**它是裁决，照它执行**：
+                   - 说「计划仍有效，一个字都不要改」→ 就真的不要改。哪怕有漂移警报，也只是口头提醒学员，别动文件。
+                   - 说「只需刷新基准行」→ 只改 `生成`、`本次修订: 基准刷新`、`数据基准` 三行，**其余内容原样保留**，不要顺手重排。
+                   - 说「需要重排」→ 才重写，并在 `本次修订` 里写明它给的原因。
+                2. 只有两种情况你可以无视它的「不用动」：学员明确要求改计划（写 `学员要求`），或出现了看板看不到的新事实（比如学员说考试取消了，写 `漂移处置`/`科目变更`）。
+                3. **不要为了「写一份」而写。** 反复重排会让计划只增不减、很快变成一堆没人看的冗余——那比不写更糟。学员没提、看板说不用动，就不要动。
+                4. 真要重排时：先写 `总规划.md`，再处理 `本周任务.md`；写完一句话告诉学员改了什么、为什么改。
+                5. **各科任务与计划是两件事**：下发或重发任务**不需要**动计划；刷新计划也不代表任务要跟着改。看板会把这两件事分开告诉你。某科一旦回执（档案「更新于」变了），它手上的旧任务就失效（连勾选都会被拒），看板会点名「需重发」。
+                6. **每次改动都要在 `变更记录.md` 追加一条**（改计划 / 下发任务 / 重发任务 / 全局变化）。落下一条，看板下一轮就会报「变更记录没跟上」。追加，不是重写、更不是清空。
+                7. 学员给的现实约束（课表、考试、临时有事、这周只剩两天）优先于任何计划完整性——但它仍然要满足上面的条件才动笔；临时变动本身不算「重排计划」的理由，除非它改变了本周的 MVE。
+
+                # 输出规范
+                - 默认中文。先给结论：这一周哪科最危险、必须做什么，再展开理由。
+                - 不念看板：只讲判断和动作，不把摘要复述一遍。
+                - 课程安排、考试时间、放假这类时效信息先 `web_search` 或问学员核实，不编造。
+          # ── study plugins ───────────────────────────────────────────────────────────
+
+          # 学习插件**一行入口**：`study-suite` 内部把各个部件挂起来，预设只说"我要哪几个"。
+          # 总规划只用 `plan`（全科看板注入 + 漂移检测 + 计划/任务结构守护）；它**不挂 companion**——
+          # 各科档案由各科自己的会话维护，总规划只读。
+          # 可用部件：plan / companion / judge / code-run / netsec-range
+          - id: study
+            name: '@local/dsh-study/study-suite.js'
+            config:
+              parts: [ plan ]
+              options:
+                # 看板尾部渲染「心灵的话」——**只有**陪伴笔记里「要跟总规划说的」那一节会外流。
+                # 不配 = 不渲染（零成本），所以别的预设一个字都不用改。
+                plan:
+                  companionDir: '心灵'
+
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+
+          # ── shell ───────────────────────────────────────────────────────────────────
+
+          # `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to
+          # publish `DSH_WEB_URL`/`DSH_WEB_MODE`, and a host row that injects a service is
+          # the criterion for host-plane ownership — injection resolves before any session
+          # exists, so there is no agent to key by. Behind a preset realm those variables
+          # never reached the model's shell at all. Both shell tools consume the host
+          # registry from here; their executors (`bash-sandbox`/`pwsh-sandbox`) are
+          # host-plane too.
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+
+          # ── filesystem ──────────────────────────────────────────────────────────────
+
+          # Both register into the host `tools` registry and provide nothing, so
+          # they need no realm. The `fs` service and its policy stay in the host.
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false
+
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+
+          # ── background jobs ────────────────────────────────────────────────────────
+
+          # Only the model-facing controls. The task REGISTRY stays on the host plane:
+          # its producers sit outside any realm this file could put it in — `tool-bash`
+          # above resolves it with `ctx.get`, and an entry-local realm here is invisible
+          # to every sibling row, so `run_in_background` would answer "background jobs
+          # unavailable" while these controls sat in the catalog. The registry is keyed by
+          # owning agent anyway, so one host instance serves every session. What a preset
+          # chooses is whether its agent can collect and stop background work at all.
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+
+          # ── skills ──────────────────────────────────────────────────────────────────
+
+          # The skill REGISTRY lives in the host composition and is layered per scope:
+          # these rows register into THIS preset's layer of it, so they need no realm.
+          # `skill-filesystem` contributes local-root discovery for agents on this preset, and
+          # `tool-skill` gives them the catalog and loader; the merged catalog also
+          # carries whatever the deployment registered globally (repository plugins).
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+
+          # ── goals ───────────────────────────────────────────────────────────────────
+
+          # The goal service and session driver stay on the host plane, where the Gateway
+          # can resolve them. The human command and model-facing tool register into this
+          # preset's scoped layers.
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+
+          # ── plan mode ───────────────────────────────────────────────────────────────
+
+          # Plan state is per-agent by nature, so an entry-local realm is not a
+          # workaround here — it is the correct lifetime.
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                    Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                    Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                    Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+
+          # ── compaction ──────────────────────────────────────────────────────────────
+
+          # `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner must
+          # share this realm rather than sit outside it.
+          #
+          # `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST
+          # plane, and the rows here resolve that one instance. It takes no configuration,
+          # keys every fold by Session, and owns the context-meter projection units the
+          # browser reads for every session — behind a realm those units would come and go
+          # with whichever presets happen to be mounted. What a preset chooses is whether
+          # its agent compacts at all, which is `compaction-basic` below.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  summarizationProvider: deepseek-official
+                  summarizationModel: deepseek-v4-flash-vision-exp
+
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+          # ── delegation and workflows ────────────────────────────────────────────────
+
+          # The `subagents` registry and its spawn/fork backends live in the HOST
+          # composition: the registry is a process singleton whose cross-session queries
+          # the api-proxy serves to the browser, and a provider name may only be
+          # registered once. This preset contributes the delegation TOOLS, which resolve
+          # that host registry.
+          #
+          # `workflows` is different — nothing outside an agent reads it — so every row
+          # that reaches it shares one entry-local realm here, and a consumer left
+          # outside would resolve a host registry this preset does not populate.
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelection: true
+                  modelDiscovery: true
+                  backgroundMode: continuable
+
+              # Fork omits model selection so provider/model stay equal to the parent and
+              # the inherited history remains eligible for KV Cache reuse. This preset
+              # keeps fork continuable; parent and child inherit the same messaging tool,
+              # while the parent id and return guidance follow the inherited history.
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+
+              # Production dsh does not install these optional providers. Install the
+              # matching Bundle in this Profile and restart the Host, then copy this
+              # preset and remove `disabled` from the matching tool row. Host availability
+              # alone grants no tool.
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+
+          # ── remaining model-facing rows ─────────────────────────────────────────────
+
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+
+          # The `web` service and its search provider stay in the host composition; only
+          # the model-facing tool is per-session.
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchMaxResults: 12
+              searchMaxQueries: 4
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
